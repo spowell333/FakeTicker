@@ -31,18 +31,15 @@ $collector->join();
 
 sub quote_loader{
 	my ($quote_service, $queue, @tickers) = @_;
-	my $rep_count = 0;
 	while (can_run()) {
-		print 'Quoter can run: ' . $rep_count++  .qq{\n};
 		my %info = $quote_service->fetch("usa", @tickers);
+		
 		ATTRIBUTE: while (my ($k, $v) =each(%info)) { 
 			if ($k =~/ask/ or $k =~/bid/) {
 				next ATTRIBUTE if (!defined($v));
 				print $k ,' ',$v,qq{\n};
 				my @price : shared = ($k, $v);
 				$queue->enqueue(\@price);
-				
-				
 			} 
 		}
 		
@@ -54,7 +51,6 @@ sub quote_loader{
 sub quote_collector {
 	my ($queue, $randomiser_queue) = @_;
     my %quote_data  = ();
-    my %threads = ();
     my %queues = ();
                  
 	my $rep_count = 0 ;
@@ -96,24 +92,24 @@ sub quote_randomiser{
 		if (defined($fresh_quote)) { 
 			unshift(@all_quotes, $fresh_quote);
 		}
+		
+		
 		if ( 0 == scalar(@all_quotes)) { 
 			$fresh_quote = $q->dequeue();
 			unshift(@all_quotes, $fresh_quote);
 		}
-		
 		
 		my $data_points = scalar(@all_quotes);
 		$data_points = ($data_points > 20) ? 20 :$data_points;
 		 
 		my $mean_ask = 0 ; 
 		
-		print "Data points " . $data_points .qq{\n};
 		for(my $i=0 ; $i < $data_points ; $i++) { 
 			$mean_ask += $all_quotes[$i];
 		}
 		
 		$mean_ask /= ($data_points * 1.0);
-		print 'mean '  .  $type . ' for ' . $ticker . ' is ' .$mean_ask .qq{\n};
+		print 'mean '  .  $type . ' for ' . $ticker . ' is now ' .$mean_ask .qq{\n};
 		
 		my $msg = XMLout({
 			'TICKER' => $ticker,
