@@ -16,6 +16,8 @@ use IO::Socket::INET;
 my $SEPARATOR = qq{\x1C}; 
 my $HANGUP    = qq{\x04};
 
+
+my $DEBUG         = 0; 
 my $quote_service = Finance::Quote->new;
 my @tickers       = refresh_tickers();
 
@@ -25,21 +27,21 @@ my $counter : shared  = 200 ;
 my $quote_queue      = Thread::Queue->new();
 my $randomiser_queue =  Thread::Queue->new();
 
-my $quote_loader = threads->new(\&quote_loader, $quote_service, $quote_queue, @tickers);
-my $collector    = threads->new(\&quote_collector, $quote_queue, $randomiser_queue);
+my $quote_loader = threads->new(\&quote_loader, $quote_service, $quote_queue, $DEBUG, @tickers);
+my $collector    = threads->new(\&quote_collector, $quote_queue, $randomiser_queue, $DEBUG);
 
 $quote_loader->join();
 $collector->join();
 
 sub quote_loader{
-	my ($quote_service, $queue, @tickers) = @_;
+	my ($quote_service, $queue, $DEBUG, @tickers) = @_;
 	while (can_run()) {
 		my %info = $quote_service->fetch("usa", @tickers);
 		
 		ATTRIBUTE: while (my ($k, $v) =each(%info)) { 
 			if ($k =~/ask/ or $k =~/bid/) {
 				next ATTRIBUTE if (!defined($v));
-				print $k ,' ',$v,qq{\n};
+				print $k ,' ',$v,qq{\n} if ($DEBUG);
 				my @price : shared = ($k, $v);
 				$queue->enqueue(\@price);
 			} 
@@ -51,7 +53,7 @@ sub quote_loader{
 }
 
 sub quote_collector {
-	my ($queue, $randomiser_queue) = @_;
+	my ($queue, $randomiser_queue, $DEBUG) = @_;
     my %queues = ();
                  
 	my $rep_count = 0 ;
@@ -65,7 +67,14 @@ sub quote_collector {
 		if(!defined($queue)) {
 			$queue = Thread::Queue->new();
 			$queues{$ticker}->{$type}->[0] = $queue;
-			my $new_thread = threads->new(\&quote_randomiser, $ticker, $type, $queue, \&pulish_as_json);
+			my $new_thread = threads->new(
+				\&quote_randomiser, 
+				$ticker, 
+				$type, 
+				$queue, 
+				\&get_fresh_quote_nb, 
+				\&pulish_as_json, 
+				$DEBUG);
 			$new_thread->detach();
 				
 		}
@@ -79,15 +88,16 @@ sub quote_randomiser{
 	my $ticker		= shift;
 	my $type		= shift;
 	my $q			= shift;
+	my $get_fresh_q = shift;
 	my $publisher 	= shift;
 	my $DEBUG 		= shift || 0;
 	
-	print 'randomiser for ' . $ticker . ' / ' . $type . qq{\n}; 
+	print 'randomiser for ' . $ticker . ' / ' . $type . qq{ started \n}; 
 		
 	my @all_quotes = ();
 	my $recent_quote = 0;
 	while (1) {
-		my $fresh_quote = $q->dequeue_nb();
+		my $fresh_quote = $get_fresh_q->($q);
 		if (defined($fresh_quote)) { 
 			unshift(@all_quotes, $fresh_quote);
 			$recent_quote = $fresh_quote;
@@ -122,11 +132,20 @@ sub quote_randomiser{
 			'PRICE'  => $mean_price_with_rounding,
 		};
 		
-		$publisher->($quote);
+		$publisher->($quote, $DEBUG);
 		
 		threads->yield();
 		sleep(2);
 	}
+}
+
+
+sub get_fresh_quote_nb {
+	return shift->dequeue_nb();
+}
+
+sub get_fresh_quote_b {
+	return shift->dequeue();
 }
 
 sub apply_jitter{
@@ -176,17 +195,20 @@ sub apply_rounding{
 	return int($scaled_up_price + (0.5 * $rounding_dir) ) / $multiplier;
 	
 }
-sub pulish_as_json($){
+sub pulish_as_json {
 	my $quote = shift;
+	my $DEBUG = shift || 0;
 	my $json_text = to_json($quote);
-	print $json_text .qq{\n};
+	print $json_text .qq{\n} if ($DEBUG);
 	send_to_port($json_text);
 }
 
-sub publish_as_xml($) { 
+sub publish_as_xml { 
 	my $quote = shift;
+	my $DEBUG = shift || 0;
 	my $msg = XMLout($quote);
-	print $msg .qq{\n};
+	print $msg .qq{\n} if ($DEBUG);
+	send_to_port($msg);
 }
 
 
@@ -199,6 +221,7 @@ sub send_to_port($) {
 
 	my $optional_newline = ($message =~ /\n\z/xms) ? q{} : qq{\n} ;
 	if (defined($sock) && $sock->connected()) { 
+		print 'About to send ' . $message . qq{ to $server : $port\n}; 
 		$sock->send($message . $optional_newline . $HANGUP . qq{\n});
 	}
 
