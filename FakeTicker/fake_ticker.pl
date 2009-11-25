@@ -17,7 +17,7 @@ my $SEPARATOR = qq{\x1C};
 my $HANGUP    = qq{\x04};
 
 
-my $DEBUG         = 0; 
+my $DEBUG         = 1; 
 my $quote_service = Finance::Quote->new;
 my @tickers       = refresh_tickers();
 
@@ -135,7 +135,9 @@ sub quote_randomiser{
 		$publisher->($quote, $DEBUG);
 		
 		threads->yield();
-		sleep(2);
+		my $nap_time = int(rand(5));
+		print 'About to sleep for ' . $nap_time . 's' .qq{\n} if ($DEBUG);	
+		sleep($nap_time);
 	}
 }
 
@@ -235,7 +237,7 @@ sub get_server_port() {
 }
 
 sub refresh_tickers {
-	return qw{GS GOOG MKTX BAC BARC.L GM};
+	return qw{GS GOOG MKTX BAC BARC.L JPM IBM OIL};
 	#return qw{GOOG};
 }
 
