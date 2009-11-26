@@ -25,10 +25,10 @@ my $counter_semaphore = Thread::Semaphore->new();
 my $counter : shared  = 200 ;
 
 my $quote_queue      = Thread::Queue->new();
-my $randomiser_queue =  Thread::Queue->new();
+
 
 my $quote_loader = threads->new(\&quote_loader, $quote_service, $quote_queue, $DEBUG, @tickers);
-my $collector    = threads->new(\&quote_collector, $quote_queue, $randomiser_queue, $DEBUG);
+my $collector    = threads->new(\&quote_collector, $quote_queue, \&quote_randomiser, $DEBUG);
 
 $quote_loader->join();
 $collector->join();
@@ -47,13 +47,13 @@ sub quote_loader{
 			} 
 		}
 		
-		sleep 60;
+		sleep 30;
 	}
 	
 }
 
 sub quote_collector {
-	my ($queue, $randomiser_queue, $DEBUG) = @_;
+	my ($queue, $output_handler, $DEBUG) = @_;
     my %queues = ();
                  
 	my $rep_count = 0 ;
@@ -63,24 +63,46 @@ sub quote_collector {
 		my ($ticker_and_type, $price)= @{$price_ref};
 		my ($ticker, $type) = split(/$SEPARATOR/,$ticker_and_type, 2);
 		
-		my $queue = $queues{$ticker}->{$type}->[0];
-		if(!defined($queue)) {
-			$queue = Thread::Queue->new();
-			$queues{$ticker}->{$type}->[0] = $queue;
+		my $output_queue = $queues{$ticker}->{$type}->[0];
+		if(!defined($output_queue)) {
+			$output_queue = Thread::Queue->new();
+			$queues{$ticker}->{$type}->[0] = $output_queue;
 			my $new_thread = threads->new(
-				\&quote_randomiser, 
+				$output_handler, 
 				$ticker, 
 				$type, 
-				$queue, 
+				$output_queue, 
 				\&get_fresh_quote_nb, 
 				\&pulish_as_json, 
 				$DEBUG);
 			$new_thread->detach();
 				
 		}
+		my $shared_price : shared = $price;
+		$output_queue->enqueue($shared_price);
 		
-		my $shared_price : shared = $price; 
-		$queue->enqueue($shared_price);
+		
+	}
+}
+sub quote_publisher {
+	my $ticker		= shift;
+	my $type		= shift;
+	my $q			= shift;
+	my $get_fresh_q = shift; # ignored here, we always want to block
+	my $publisher 	= shift;
+	my $DEBUG 		= shift || 0;
+	
+	print 'publisher for ' . $ticker . ' / ' . $type . qq{ started \n}; 	
+	while(my $fresh_quote = get_fresh_quote_b($q)) {
+		
+		my $quote = {
+			'TICKER' => $ticker,
+			'TYPE'   => $type,
+			'PRICE'  => $fresh_quote,
+		};
+	
+		$publisher->($quote, $DEBUG);
+	
 	}
 }
 
@@ -94,7 +116,8 @@ sub quote_randomiser{
 	
 	print 'randomiser for ' . $ticker . ' / ' . $type . qq{ started \n}; 
 		
-	my @all_quotes = ();
+	my @all_quotes   = ();
+	my %queues       = ();
 	my $recent_quote = 0;
 	while (1) {
 		my $fresh_quote = $get_fresh_q->($q);
@@ -126,14 +149,28 @@ sub quote_randomiser{
 		print 'mean '  .  $type . ' for ' . $ticker . ' is now ' .$mean_price_with_rounding . 
 		' latest price ' . $recent_quote . ' with ' . $data_points . ' data point(s)'. qq{\n} if ($DEBUG);
 		
-		my $quote = {
-			'TICKER' => $ticker,
-			'TYPE'   => $type,
-			'PRICE'  => $mean_price_with_rounding,
-		};
+	
+		#my $output_queue = get_queue_for_thread();
 		
-		$publisher->($quote, $DEBUG);
-		
+		my $output_queue = $queues{$ticker}->{$type}->[0];
+		if(!defined($output_queue)) {
+			$output_queue = Thread::Queue->new();
+			$queues{$ticker}->{$type}->[0] = $output_queue;
+			my $new_thread = threads->new(
+				\&quote_publisher, 
+				$ticker, 
+				$type, 
+				$output_queue, 
+				\&get_fresh_quote_b, 
+				$publisher, 
+				$DEBUG);
+			$new_thread->detach();
+				
+		}
+		my $shared_price : shared = $mean_price_with_rounding;
+		$output_queue->enqueue($shared_price);
+			
+
 		threads->yield();
 		my $nap_time = int(rand(5));
 		print 'About to sleep for ' . $nap_time . 's' .qq{\n} if ($DEBUG);	
@@ -156,8 +193,12 @@ sub apply_jitter{
 	my $DEBUG       = shift || 0;
 	
 	my $diff = $real_quote - $fake_quote;
-	print 'About to apply a difference of ' . $diff .qq{\n} if ($DEBUG);
-	print '$diff is '.(($diff>0)?'>':'<=').' 0, we should be ' . (($diff>0) ?  'BUY' : 'SELL') . 'ING' .qq{\n} if ($DEBUG);
+	print 	'About to apply a difference of ' . $diff /2.0 . 
+			qq{ to a real price of $real_quote\n} if ($DEBUG);
+	$fake_quote += ($diff / 2.0);
+	
+	print 	'$diff is '.(($diff>0)?'>':'<=').' 0, '.
+			'we should be ' . (($diff>0) ?  'BUY' : 'SELL') . 'ING' .qq{\n} if ($DEBUG);
 	
 	my $jitter = rand() - 0.5;
 	print 'About to scale $diff by ' . $jitter .qq{\n} if ($DEBUG);
@@ -214,10 +255,10 @@ sub publish_as_xml {
 }
 
 
-sub send_to_port($) { 
+sub send_to_port { 
 	my $message = shift;
-	my $port    = get_server_port();
-	my $server  = get_server_address();
+	my $port    = shift || get_server_port();
+	my $server  = shift || get_server_address();
 
 	my $sock = IO::Socket::INET->new($server . ':' . $port ) ; 
 
@@ -229,16 +270,24 @@ sub send_to_port($) {
 
 }
 
+sub send_shutdown() { 
+	send_to_port("SHUTDOWN\n", get_admin_port());
+	send_to_port($HANGUP, get_server_port());
+}
+
 sub get_server_address(){
 	return "127.0.0.1";
 }
 sub get_server_port() { 
 	return 4200;
 }
+sub get_admin_port() { 
+	return 4201;
+}
 
 sub refresh_tickers {
-	return qw{GS GOOG MKTX BAC BARC.L JPM IBM OIL};
-	#return qw{GOOG};
+	#return qw{YHOO MSFT CSCO GOOG MKTX C BAC  JPM IBM OIL PM LMT BA HON BTI RAI INTC GE UNG QQQQ};
+	return qw{BARC.L GSK LSE.L HSBA.L LLOY.L RBS.L UU.L SVT.L BG.L BP.L CPG.L BVIC.L VOD.L ANTO.L TSCO.L};
 }
 
 sub get_ask{
@@ -260,7 +309,10 @@ sub can_run{
 	$counter_semaphore->up();
 	
 	print '$counter is now ' . $counter . qq{\n};
-	return $answer > 0;
+	my $can_run = $answer > 0;
+	 
+	send_shutdown() unless ($can_run);
+	return $can_run;
 }
 
 
